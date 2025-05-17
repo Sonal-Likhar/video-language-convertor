@@ -1,0 +1,388 @@
+# from fastapi import FastAPI, File, UploadFile, HTTPException
+# import shutil
+# import os
+# import subprocess
+# import whisper
+# import torch
+# from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
+# from fastapi.middleware.cors import CORSMiddleware
+# from TTS.api import TTS
+# from deepmultilingualpunctuation import PunctuationModel
+# from pathlib import Path
+# from fastapi.responses import FileResponse, JSONResponse
+# from fastapi.staticfiles import StaticFiles
+# import time
+
+# app = FastAPI()
+
+# # Enable CORS
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["*"],
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
+
+# # Folder paths
+# UPLOAD_FOLDER = "uploads"
+# AUDIO_FOLDER = "audio"
+# TRANSCRIPTION_FOLDER = "transcriptions"
+# TRANSLATED_TEXT_FOLDER = "translated_text"
+# TTS_OUTPUT_FOLDER = "tts_output"
+# STATIC_FOLDER = "static"
+# os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+# os.makedirs(AUDIO_FOLDER, exist_ok=True)
+# os.makedirs(TRANSCRIPTION_FOLDER, exist_ok=True)
+# os.makedirs(TRANSLATED_TEXT_FOLDER, exist_ok=True)
+# os.makedirs(TTS_OUTPUT_FOLDER, exist_ok=True)
+# os.makedirs(STATIC_FOLDER, exist_ok=True)
+
+# app.mount("/static", StaticFiles(directory=STATIC_FOLDER), name="static")
+
+# # Supported video formats
+# ALLOWED_VIDEO_EXTENSIONS = {"mp4", "mkv", "avi", "mov", "flv"}
+
+# # Load models
+# device = "cuda" if torch.cuda.is_available() else "cpu"
+# whisper_model = whisper.load_model("medium").to(device)
+# tokenizer = M2M100Tokenizer.from_pretrained("facebook/m2m100_418M")
+# translator = M2M100ForConditionalGeneration.from_pretrained("facebook/m2m100_418M").to(device)
+# model_punct = PunctuationModel()
+# tts_model = TTS(model_name="tts_models/multilingual/multi-dataset/your_tts", progress_bar=False).to(device)
+
+# def generate_srt(transcription_text, translated_text, output_path):
+#     """Generate SRT subtitle file from translated text"""
+#     lines = [line.strip() for line in translated_text.split('.') if line.strip()]
+#     srt_content = []
+    
+#     for i, line in enumerate(lines, 1):
+#         start_time = time.strftime('%H:%M:%S', time.gmtime(i * 5 - 5)) + ',000'
+#         end_time = time.strftime('%H:%M:%S', time.gmtime(i * 5)) + ',000'
+#         srt_content.append(f"{i}\n{start_time} --> {end_time}\n{line}.\n")
+    
+#     with open(output_path, 'w', encoding='utf-8') as f:
+#         f.write('\n'.join(srt_content))
+
+# @app.post("/upload/")
+# async def upload_video(file: UploadFile = File(...), target_lang: str = "en"):
+#     try:
+#         # Validate file
+#         filename = file.filename
+#         extension = filename.split(".")[-1].lower()
+#         if extension not in ALLOWED_VIDEO_EXTENSIONS:
+#             raise HTTPException(400, detail="Invalid file format")
+
+#         # Save uploaded file
+#         video_path = os.path.join(UPLOAD_FOLDER, filename)
+#         with open(video_path, "wb") as buffer:
+#             shutil.copyfileobj(file.file, buffer)
+
+#         # Prepare paths
+#         base_name = os.path.splitext(filename)[0]
+#         audio_path = os.path.join(AUDIO_FOLDER, f"{base_name}.wav")
+#         transcription_path = os.path.join(TRANSCRIPTION_FOLDER, f"{base_name}.txt")
+#         translated_path = os.path.join(TRANSLATED_TEXT_FOLDER, f"{base_name}_translated.txt")
+#         tts_output_path = os.path.join(TTS_OUTPUT_FOLDER, f"{base_name}_translated.wav")
+#         srt_path = os.path.join(STATIC_FOLDER, f"{base_name}_subtitles.srt")
+#         transcript_path = os.path.join(STATIC_FOLDER, f"{base_name}_transcript.txt")
+#         final_video_path = os.path.join(STATIC_FOLDER, f"{base_name}_final.mp4")
+
+#         # 1. Extract audio
+#         subprocess.run([
+#             "ffmpeg", "-i", video_path,
+#             "-ac", "1", "-ar", "16000", "-q:a", "0", "-map", "a", audio_path
+#         ], check=True)
+
+#         # 2. Transcribe
+#         result = whisper_model.transcribe(audio_path, language="hi")
+#         transcription_text = result["text"]
+#         transcription_text = model_punct.restore_punctuation(transcription_text)
+        
+#         with open(transcription_path, "w", encoding="utf-8") as f:
+#             f.write(transcription_text)
+        
+#         # 3. Translate
+#         tokenizer.src_lang = "hi"
+#         inputs = tokenizer(transcription_text, return_tensors="pt", padding=True, truncation=True).to(device)
+#         translated_tokens = translator.generate(**inputs, forced_bos_token_id=tokenizer.get_lang_id(target_lang))
+#         translated_text = tokenizer.decode(translated_tokens[0], skip_special_tokens=True)
+        
+#         with open(translated_path, "w", encoding="utf-8") as f:
+#             f.write(translated_text)
+
+#         # 4. Generate TTS
+#         tts_model.tts_to_file(
+#             text=translated_text,
+#             file_path=tts_output_path,
+#             language=target_lang,
+#             speaker_wav=audio_path
+#         )
+
+#         # 5. Generate subtitles
+#         generate_srt(transcription_text, translated_text, srt_path)
+        
+#         # 6. Copy transcript to static
+#         shutil.copy(transcription_path, transcript_path)
+
+#         # 7. Mute original video
+#         muted_video_path = os.path.join(UPLOAD_FOLDER, f"muted_{filename}")
+#         subprocess.run([
+#             "ffmpeg", "-i", video_path,
+#             "-c", "copy", "-an", muted_video_path
+#         ], check=True)
+
+#         # 8. Run Wav2Lip
+#         try:
+#             subprocess.run([
+#                 "python", "Wav2Lip/inference.py",
+#                 "--checkpoint_path", "Wav2Lip/wav2lip.pth",
+#                 "--face", muted_video_path,
+#                 "--audio", tts_output_path,
+#                 "--outfile", final_video_path
+#             ], check=True, cwd="Wav2Lip")
+#         except subprocess.CalledProcessError as e:
+#             raise HTTPException(500, detail=f"Wav2Lip failed: {str(e)}")
+
+#         return JSONResponse({
+#             "status": "success",
+#             "video_url": f"/static/{base_name}_final.mp4",
+#             "srt_url": f"/static/{base_name}_subtitles.srt",
+#             "transcript_url": f"/static/{base_name}_transcript.txt",
+#             "transcription": transcription_text,
+#             "translation": translated_text
+#         })
+
+#     except Exception as e:
+#         return JSONResponse({
+#             "status": "error",
+#             "message": str(e)
+#         }, status_code=500)
+
+# @app.get("/")
+# async def health_check():
+#     return {"status": "ok"}
+
+
+
+from fastapi import FastAPI, File, UploadFile, HTTPException
+import shutil
+import os
+import subprocess
+import whisper
+import torch
+from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
+from fastapi.middleware.cors import CORSMiddleware
+from TTS.api import TTS
+from deepmultilingualpunctuation import PunctuationModel
+from pathlib import Path
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
+# import webvtt
+from datetime import timedelta
+
+# Initialize FastAPI
+app = FastAPI()
+
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Folder paths
+UPLOAD_FOLDER = "uploads"
+AUDIO_FOLDER = "audio"
+TRANSCRIPTION_FOLDER = "transcriptions"
+TRANSLATED_TEXT_FOLDER = "translated_text"
+TTS_OUTPUT_FOLDER = "tts_output"
+SUBTITLES_FOLDER = "subtitles"
+STATIC_VIDEOS_FOLDER = os.path.join("static", "videos")
+
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(AUDIO_FOLDER, exist_ok=True)
+os.makedirs(TRANSCRIPTION_FOLDER, exist_ok=True)
+os.makedirs(TRANSLATED_TEXT_FOLDER, exist_ok=True)
+os.makedirs(TTS_OUTPUT_FOLDER, exist_ok=True)
+os.makedirs(SUBTITLES_FOLDER, exist_ok=True)
+os.makedirs(STATIC_VIDEOS_FOLDER, exist_ok=True)
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Supported video formats
+ALLOWED_VIDEO_EXTENSIONS = {"mp4", "mkv", "avi", "mov", "flv"}
+
+# Load models
+device = "cuda" if torch.cuda.is_available() else "cpu"
+whisper_model = whisper.load_model("medium").to(device)
+tokenizer = M2M100Tokenizer.from_pretrained("facebook/m2m100_418M")
+translator = M2M100ForConditionalGeneration.from_pretrained("facebook/m2m100_418M").to(device)
+model_punct = PunctuationModel()
+tts_model = TTS(model_name="tts_models/multilingual/multi-dataset/your_tts", progress_bar=False).to(device)
+
+# --- Helper functions ---
+def get_latest_video(folder):
+    mp4_files = list(Path(folder).glob("*.mp4"))
+    if not mp4_files:
+        raise FileNotFoundError("No MP4 files found in the uploads folder.")
+    return max(mp4_files, key=os.path.getctime)
+
+def mute_video(input_path, output_folder):
+    input_filename = os.path.basename(input_path)
+    output_path = os.path.join(output_folder, f"muted_{input_filename}")
+    os.makedirs(output_folder, exist_ok=True)
+
+    command = [
+        "ffmpeg",
+        "-i", str(input_path),
+        "-c", "copy",
+        "-an",  # remove audio
+        output_path
+    ]
+
+    subprocess.run(command, check=True)
+    return output_path
+
+def create_srt_from_segments(segments, output_path, translated_text=None):
+    with open(output_path, 'w', encoding='utf-8') as f:
+        for i, segment in enumerate(segments, start=1):
+            start_time = timedelta(seconds=segment['start'])
+            end_time = timedelta(seconds=segment['end'])
+            
+            # Format the time as SRT requires: HH:MM:SS,mmm
+            start_str = f"{start_time.seconds // 3600:02d}:{(start_time.seconds % 3600) // 60:02d}:{start_time.seconds % 60:02d},{start_time.microseconds // 1000:03d}"
+            end_str = f"{end_time.seconds // 3600:02d}:{(end_time.seconds % 3600) // 60:02d}:{end_time.seconds % 60:02d},{end_time.microseconds // 1000:03d}"
+            
+            text = translated_text if translated_text else segment['text']
+            
+            f.write(f"{i}\n")
+            f.write(f"{start_str} --> {end_str}\n")
+            f.write(f"{text}\n\n")
+
+def embed_subtitles(video_path, subtitle_path, output_path):
+    command = [
+        "ffmpeg",
+        "-i", video_path,
+        "-vf", f"subtitles={subtitle_path}:force_style='Fontsize=24,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=3,Outline=1,Shadow=0,MarginV=20'",
+        "-c:a", "copy",
+        "-y",  # Overwrite output file if it exists
+        output_path
+    ]
+    subprocess.run(command, check=True)
+
+@app.get("/")
+async def home():
+    return {"message": "FastAPI is running!"}
+
+@app.post("/upload/")
+async def upload_video(file: UploadFile = File(...), target_lang: str = "en"):
+    filename = file.filename
+    extension = filename.rsplit(".", 1)[-1].lower()
+
+    if extension not in ALLOWED_VIDEO_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Invalid file format.")
+
+    # Save uploaded video
+    video_path = os.path.join(UPLOAD_FOLDER, filename)
+    with open(video_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    # Prepare paths
+    name_without_ext = os.path.splitext(filename)[0]
+    audio_path = os.path.join(AUDIO_FOLDER, f"{name_without_ext}.wav")
+    transcription_path = os.path.join(TRANSCRIPTION_FOLDER, f"{name_without_ext}.txt")
+    translated_path = os.path.join(TRANSLATED_TEXT_FOLDER, f"{name_without_ext}_translated.txt")
+    tts_output_path = os.path.join(TTS_OUTPUT_FOLDER, f"{name_without_ext}_translated.wav")
+    original_srt_path = os.path.join(SUBTITLES_FOLDER, f"{name_without_ext}_original.srt")
+    translated_srt_path = os.path.join(SUBTITLES_FOLDER, f"{name_without_ext}_translated.srt")
+
+    # Extract audio using FFmpeg
+    subprocess.run([
+        "ffmpeg", "-i", video_path,
+        "-ac", "1", "-ar", "16000", "-q:a", "0", "-map", "a", audio_path
+    ], check=True)
+
+    # Transcribe with Whisper (forced Hindi)
+    result = whisper_model.transcribe(audio_path, language="hi")
+    transcription_text = result["text"]
+    segments = result["segments"]
+
+    # Add punctuation
+    transcription_text = model_punct.restore_punctuation(transcription_text)
+
+    # Save transcription
+    with open(transcription_path, "w", encoding="utf-8") as f:
+        f.write(transcription_text)
+
+    # Create original SRT file
+    create_srt_from_segments(segments, original_srt_path)
+
+    # Translate using M2M100
+    tokenizer.src_lang = "hi"
+    inputs = tokenizer(transcription_text, return_tensors="pt", padding=True, truncation=True).to(device)
+    translated_tokens = translator.generate(**inputs, forced_bos_token_id=tokenizer.get_lang_id(target_lang))
+    translated_text = tokenizer.decode(translated_tokens[0], skip_special_tokens=True)
+
+    # Save translated text
+    with open(translated_path, "w", encoding="utf-8") as f:
+        f.write(translated_text)
+
+    # Create translated SRT file
+    create_srt_from_segments(segments, translated_srt_path, translated_text)
+
+    # Generate translated audio with YourTTS
+    tts_model.tts_to_file(
+        text=translated_text,
+        file_path=tts_output_path,
+        language=target_lang,
+        speaker_wav=audio_path
+    )
+
+    # Step 5: Mute original video
+    muted_video_path = os.path.join("Wav2Lip", f"muted_{filename}")
+    subprocess.run([
+        "ffmpeg", "-i", video_path,
+        "-c", "copy", "-an", muted_video_path
+    ], check=True)
+
+    # Step 6: Copy translated audio directly to Wav2Lip
+    destination_audio_path = os.path.join("Wav2Lip", os.path.basename(tts_output_path))
+    shutil.copy(tts_output_path, destination_audio_path)
+
+    wav2lip_python = os.path.abspath(os.path.join("Wav2Lip", "lip", "Scripts", "python.exe"))
+    inference_script = os.path.abspath(os.path.join("Wav2Lip", "inference.py"))
+    face_path = os.path.abspath(os.path.join("Wav2Lip", f"muted_{filename}"))
+    audio_path = os.path.abspath(os.path.join("Wav2Lip", os.path.basename(tts_output_path)))
+    final_output_path = os.path.abspath(os.path.join("Wav2Lip", f"lip_synced_{filename}"))
+    
+    subprocess.run([
+        wav2lip_python,
+        inference_script,
+        "--checkpoint_path", os.path.abspath("Wav2Lip/wav2lip.pth"),
+        "--face", face_path,
+        "--audio", audio_path,
+        "--outfile", final_output_path
+    ], check=True, cwd="Wav2Lip")
+
+    # Create subtitled video
+    subtitled_video_path = os.path.join("Wav2Lip", f"subtitled_{filename}")
+    embed_subtitles(final_output_path, translated_srt_path, subtitled_video_path)
+
+    # Copy the final lip-synced video to static folder to serve it
+    output_name = f"subtitled_{filename}"
+    static_output_path = os.path.join("static", "videos", output_name)
+    os.makedirs(os.path.dirname(static_output_path), exist_ok=True)
+    shutil.copy(subtitled_video_path, static_output_path)
+
+    # Generate video URL for frontend
+    video_url = f"/static/videos/{output_name}"
+    
+    return FileResponse(
+        path=static_output_path,
+        media_type="video/mp4",
+        filename="lip_synced_with_subtitles.mp4"
+    )

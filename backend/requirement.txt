@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+torch
+transformers
+openai-whisper
+deepmultilingualpunctuation
+TTS
+ffmpeg-python
+python-multipart

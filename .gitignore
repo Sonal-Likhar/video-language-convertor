@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pth
+*.egg-info/
+.env
+*.env
+
+# Virtual Environments
+.venv/
+env/
+venv/
+
+# FastAPI cache
+*.sqlite3
+
+# VS Code
+.vscode/
+
+# Node.js
+frontend/video-upload-frontend/node_modules/
+frontend/video-upload-frontend/.env
+
+# Build output
+dist/
+build/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
